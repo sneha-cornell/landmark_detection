@@ -142,6 +142,58 @@ embedding = backbone(img[None], training=False)      # (1, 128)
 
 ---
 
+## Training Dataset: WIDER FACE
+
+RetinaFace was trained on **WIDER FACE**, a large-scale face detection benchmark scraped from the web across 61 event categories (parade, protest, concert, sports, etc.).
+
+### Scale
+
+| Stat | Value |
+|---|---|
+| Total images | 32,203 |
+| Total annotated faces | 393,703 |
+| Training split | 12,880 images |
+| Validation split | 3,226 images |
+| Test split | 16,097 images |
+
+### Annotations
+
+Each face in the training set has:
+- **Bounding box** — (x, y, width, height) in pixel coordinates
+- **5-point landmarks** — added by the RetinaFace authors on top of WIDER FACE for the ~13,000 training images (left eye, right eye, nose tip, left mouth corner, right mouth corner)
+- **Difficulty flag** — Easy / Medium / Hard based on scale, occlusion, and pose
+
+The landmark annotations are not part of the original WIDER FACE release — they were added specifically for RetinaFace training and are distributed separately by the InsightFace team.
+
+### Difficulty split
+
+WIDER FACE deliberately includes hard conditions to build a robust detector:
+
+| Difficulty | Criteria | % of faces |
+|---|---|---|
+| Easy | Large faces, frontal, minimal occlusion | ~22% |
+| Medium | Moderate scale, some occlusion or pose | ~33% |
+| Hard | Small faces (<10px), heavy occlusion, extreme pose | ~45% |
+
+45% of faces fall in the Hard category — this is why RetinaFace generalises well to real-world conditions like the partially occluded, slightly off-angle face in the example above.
+
+### Image conditions
+
+| Condition | Range in dataset |
+|---|---|
+| Faces per image | 1 – 160+ |
+| Face scale | 10px to full-image |
+| Pose | Frontal, profile, upside-down |
+| Occlusion | None to heavy (sunglasses, masks, hands) |
+| Lighting | Indoor, outdoor, night, flash |
+| Image source | Web photos across 61 event categories |
+
+### Why this matters for alignment quality
+
+The wide distribution of poses and scales in WIDER FACE means RetinaFace is robust to the kinds of faces you encounter in real deployments — not just clean frontal studio shots. The landmark predictions remain accurate even at moderate pose angles, which directly affects the quality of the similarity transform and the resulting 112×112 crop fed to the recognition model.
+
+---
+
 ## References
 
 - Deng et al., [RetinaFace: Single-Shot Multi-Level Face Localisation in the Wild](https://arxiv.org/abs/1905.00641), CVPR 2020
