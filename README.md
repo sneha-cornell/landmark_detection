@@ -85,6 +85,30 @@ RetinaFace was chosen because it performs face detection and landmark localisati
 
 ---
 
+## Edge Deployment Model (`landmark_model.h5`)
+
+For running landmark regression on the **EdgeSphere GPX-10** NPU, `build_landmark_model.py` builds a compact PFLD-style regressor that predicts 98 landmarks (196 coords) from an aligned 112×112 crop. It is verified compatible with the [GPX-10 compatibility checker](https://edgesphere.netlify.app/).
+
+| Property | Value |
+|---|---|
+| Model type | **Sequential** Keras (GPX-10 rejects Functional/subclassed) |
+| Layers | Conv2D · BatchNormalization · ReLU · AveragePooling2D · Flatten · Dense |
+| Input | 112 × 112 × 3 |
+| Output | 196 (98 landmarks × 2) |
+| Parameters | **150,516** (< 200k budget) |
+| Toolchain | TensorFlow / Keras **2.15.0**, full `.h5` export |
+| GPX-10 verdict | **Compatible ✅** — 0 unsupported layers/operators |
+
+Build it with:
+
+```bash
+python build_landmark_model.py --out landmark_model.h5
+```
+
+**GPX-10 design constraints** (why this differs from the RetinaFace/PFLD reference architectures — see `COMPILER_COMPATIBILITY.md`): the checker accepts **Sequential models only**, has **no global-pooling layer** (use `AveragePooling2D` + `Flatten` instead of `GlobalAveragePooling2D`), and no merge layers (`Add`/`Concatenate`), depthwise/separable convs, or upsampling. Every block is a plain `Conv → BN → ReLU` chain, so the whole graph maps onto the supported op set.
+
+---
+
 ## Geometric Alignment
 
 The alignment is a **similarity transform** — rotation, scale, and translation only. No warping or perspective distortion.
@@ -191,6 +215,42 @@ WIDER FACE deliberately includes hard conditions to build a robust detector:
 ### Why this matters for alignment quality
 
 The wide distribution of poses and scales in WIDER FACE means RetinaFace is robust to the kinds of faces you encounter in real deployments — not just clean frontal studio shots. The landmark predictions remain accurate even at moderate pose angles, which directly affects the quality of the similarity transform and the resulting 112×112 crop fed to the recognition model.
+
+---
+
+## Alternative Face Datasets
+
+WIDER FACE is a **detection** benchmark (5-point landmarks only). For training or fine-tuning the dense landmark regressor (`landmark_model.h5`, 98 points) or the downstream recognition backbone, other datasets are a better fit. Comparison of commonly-used options:
+
+### Landmark / alignment datasets
+
+| Dataset | Faces / Images | Landmarks | Pose & conditions | Notes |
+|---|---|---|---|---|
+| **WFLW** | 10,000 images | **98** | Large pose, occlusion, blur, make-up, expression, illumination attributes | Same 98-point scheme as this model — the most direct training source. Per-image attribute labels enable hard-case analysis |
+| **300W** | ~4,000 images | **68** | Indoor/outdoor, in-the-wild | The de-facto 68-point benchmark; unifies LFPW, AFW, HELEN, iBUG |
+| **300W-LP** | ~60,000 (synthesised) | 68 | Large-pose profiles synthesised via 3DMM | Great for pose robustness; pairs with the AFLW2000-3D test set |
+| **AFLW** | ~25,000 faces | 21 | Wide yaw range (±120°), real-world | Large, multi-view; sparser landmark scheme |
+| **COFW** | 1,852 images | 29 | Heavy occlusion focus | Small; a stress test for occlusion robustness |
+| **HELEN** | 2,330 images | 194 (dense) | High-resolution | Very dense contours; good for fine boundary detail |
+
+### Detection datasets (for the RetinaFace stage)
+
+| Dataset | Faces / Images | Landmarks | Notes |
+|---|---|---|---|
+| **WIDER FACE** | 393,703 faces / 32,203 img | 5 (added by InsightFace) | Current detector training set; hard-case coverage |
+| **FDDB** | 5,171 faces / 2,845 img | none | Classic detection eval; ellipse annotations |
+| **MAFA** | 35,806 masked faces | none | Masked/occluded-face detection |
+
+### Recognition datasets (for the downstream ArcFace backbone)
+
+| Dataset | Identities | Images | Notes |
+|---|---|---|---|
+| **CASIA-WebFace** | 10,575 | ~494K | Aligned with the same 5-point scheme used here — matches this pipeline end-to-end |
+| **VGGFace2** | 9,131 | ~3.31M | Large pose/age variation; strong for backbone pre-training |
+| **MS1M-ArcFace** | ~85K | ~5.8M | Cleaned MS-Celeb-1M; standard large-scale ArcFace training set |
+| **LFW** | 5,749 | 13,233 | Verification benchmark, not for training |
+
+**Recommendation:** for `landmark_model.h5`, train on **WFLW** (native 98-point labels) and optionally augment with **300W-LP** for large-pose robustness; evaluate NME on the WFLW test split. Keep **CASIA-WebFace** for the recognition backbone so alignment targets stay consistent across the pipeline.
 
 ---
 
