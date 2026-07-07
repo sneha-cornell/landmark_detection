@@ -92,10 +92,10 @@ For running landmark regression on the **EdgeSphere GPX-10** NPU, `build_landmar
 | Property | Value |
 |---|---|
 | Model type | **Sequential** Keras (GPX-10 rejects Functional/subclassed) |
-| Layers | Conv2D · BatchNormalization · ReLU · AveragePooling2D · Flatten · Dense |
+| Layers | Conv2D · BatchNormalization · ReLU · Flatten · Dense |
 | Input | 112 × 112 × 3 |
 | Output | 196 (98 landmarks × 2) |
-| Parameters | **150,516** (< 200k budget) |
+| Parameters | **150,580** (< 200k budget) |
 | Toolchain | TensorFlow / Keras **2.15.0**, full `.h5` export |
 | GPX-10 verdict | **Compatible ✅** — 0 unsupported layers/operators |
 
@@ -109,18 +109,26 @@ python build_landmark_model.py --out landmark_model.h5
 
 ### Training on WFLW
 
-`train_landmark.py` trains the 98-point regressor on [WFLW](https://wywu.github.io/projects/LAB/WFLW.html) using Wing loss and reports **NME** (Normalised Mean Error, inter-ocular normalisation — the standard WFLW protocol):
+`train_landmark.py` trains the 98-point regressor on [WFLW](https://wywu.github.io/projects/LAB/WFLW.html) (PFLD-style pre-cropped 112×112 format; a ready mirror is `duongnguy/WFLW_augmented` on Hugging Face) using **Wing loss**, and reports **NME** (Normalised Mean Error, inter-ocular — the standard WFLW protocol):
 
 ```bash
-python train_landmark.py --wflw_root /path/to/WFLW --epochs 120 --out landmark_model.h5
+python train_landmark.py --wflw_root /path/to/wflw --epochs 40 --out landmark_model.h5
+python evaluate.py       --wflw_root /path/to/wflw --model landmark_model.h5
 ```
 
-| Stage | WFLW test NME |
-|---|---|
-| Random init (as shipped) | ~30–50% (untrained — not usable) |
-| Target after training | this compact model typically lands **~6–8%** NME (SOTA dense models reach ~4–5% at far higher param counts) |
+**Measured accuracy** (74,950 train / 2,500 test images, 40 epochs, CPU):
 
-**GPX-10 design constraints** (why this differs from the RetinaFace/PFLD reference architectures — see `COMPILER_COMPATIBILITY.md`): the checker accepts **Sequential models only**, has **no global-pooling layer** (use `AveragePooling2D` + `Flatten` instead of `GlobalAveragePooling2D`), and no merge layers (`Add`/`Concatenate`), depthwise/separable convs, or upsampling. Every block is a plain `Conv → BN → ReLU` chain, so the whole graph maps onto the supported op set.
+| Metric | Value |
+|---|---|
+| NME (inter-ocular) | **21.77% mean / 16.34% median** |
+| Mean per-point error | 10.36 px (median 7.68 px) on the 112×112 crop |
+| Failure Rate @0.10 | 74.8% |
+| PCK@0.10 / @0.15 / @0.20 | 33.4% / 50.5% / 62.4% |
+| Mean-shape baseline (reference) | 50.1% NME |
+
+> **This is a weak baseline, not a production model.** It clearly learns (2.3× better than the mean-shape baseline) but sits well above landmark SOTA (~4% NME) and even typical compact models (~7–8%). The gap is expected: a 150k-param **direct-coordinate** regressor, trained briefly on CPU with photometric-only augmentation, on a hard dataset (WFLW is ~45% hard faces). Biggest levers to improve, in order: **geometric augmentation** (rotation/scale/translation/flip with landmark remapping), longer training with a cosine LR schedule, and heatmap-style output instead of coordinate regression (heavier, but the standard route to sub-8% NME). Note that heatmap heads use ops (e.g. transposed conv / resize) that may not be GPX-10-compatible — re-run the checker after any such change.
+
+**GPX-10 design constraints** (why this differs from the RetinaFace/PFLD reference architectures — see `COMPILER_COMPATIBILITY.md`): the checker accepts **Sequential models only**, has **no global-pooling layer**, and no merge layers (`Add`/`Concatenate`), depthwise/separable convs, or upsampling. Every block is a plain `Conv → BN → ReLU` chain, so the whole graph maps onto the supported op set. The 7×7 feature map is `Flatten`ed straight into the FC head (rather than global-average-pooled to 1×1) so spatial position is preserved for landmark regression.
 
 ---
 

@@ -33,8 +33,13 @@ def add_conv_block(model, filters, kernel_size=3, strides=1, name=None):
 
 def build_landmark_model(input_shape=(112, 112, 3), num_landmarks=98):
     # Narrow width schedule to keep total params < 200k while preserving the
-    # GPX-10-safe layer vocabulary (Conv2D / BN / ReLU / AveragePooling2D /
-    # Flatten / Dense). ~150k params at this width.
+    # GPX-10-safe layer vocabulary (Conv2D / BN / ReLU / Flatten / Dense).
+    #
+    # IMPORTANT: landmark *localisation* needs spatial detail. Global/large
+    # average pooling collapses the H x W map to 1x1 and throws that away, which
+    # caps accuracy badly (~19% NME). Instead we keep the 7x7 map and Flatten it
+    # straight into the FC head, so the regressor sees where features are.
+    # ~150k params at this width.
     model = Sequential(name="pfld_sequential")
     model.add(layers.Input(shape=input_shape, name="image"))
 
@@ -43,25 +48,21 @@ def build_landmark_model(input_shape=(112, 112, 3), num_landmarks=98):
     add_conv_block(model, 16, kernel_size=3, strides=1, name="block1")
 
     # Stage 1
-    add_conv_block(model, 32, kernel_size=3, strides=2, name="block2")   # 28x28
-    add_conv_block(model, 32, kernel_size=3, strides=1, name="block3")
+    add_conv_block(model, 24, kernel_size=3, strides=2, name="block2")   # 28x28
+    add_conv_block(model, 24, kernel_size=3, strides=1, name="block3")
 
     # Stage 2
-    add_conv_block(model, 48, kernel_size=3, strides=2, name="block4")   # 14x14
-    add_conv_block(model, 48, kernel_size=3, strides=1, name="block5")
+    add_conv_block(model, 32, kernel_size=3, strides=2, name="block4")   # 14x14
+    add_conv_block(model, 32, kernel_size=3, strides=1, name="block5")
 
     # Stage 3
-    add_conv_block(model, 64, kernel_size=3, strides=2, name="block6")   # 7x7
-    add_conv_block(model, 64, kernel_size=3, strides=1, name="block7")
+    add_conv_block(model, 32, kernel_size=3, strides=2, name="block6")   # 7x7
 
-    # Head: 7x7 average pool -> flatten -> dense -> dense
-    # (AveragePooling2D(7x7) over the 7x7 map == GlobalAveragePooling2D, but uses
-    #  a GPX-10-supported layer; 7*7 = 49 <= 400 kernel budget.)
-    model.add(layers.AveragePooling2D(pool_size=(7, 7), name="avgpool"))  # 1x1x64
-    model.add(layers.Flatten(name="flatten"))                             # (64,)
-    model.add(layers.Dense(128, name="fc1"))
+    # Head: flatten the 7x7 spatial map (preserves localisation) -> dense -> dense
+    model.add(layers.Flatten(name="flatten"))                            # (7*7*32=1568,)
+    model.add(layers.Dense(64, name="fc1"))
     model.add(layers.ReLU(name="fc1_relu"))
-    model.add(layers.Dense(num_landmarks * 2, name="landmarks"))          # (196,)
+    model.add(layers.Dense(num_landmarks * 2, name="landmarks"))         # (196,)
 
     return model
 
