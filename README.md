@@ -105,6 +105,21 @@ Build it with:
 python build_landmark_model.py --out landmark_model.h5
 ```
 
+> **Note:** `build_landmark_model.py` produces an **untrained** (random-init) model — it is architecture-only, for verifying GPX-10 compatibility. Train it before deployment.
+
+### Training on WFLW
+
+`train_landmark.py` trains the 98-point regressor on [WFLW](https://wywu.github.io/projects/LAB/WFLW.html) using Wing loss and reports **NME** (Normalised Mean Error, inter-ocular normalisation — the standard WFLW protocol):
+
+```bash
+python train_landmark.py --wflw_root /path/to/WFLW --epochs 120 --out landmark_model.h5
+```
+
+| Stage | WFLW test NME |
+|---|---|
+| Random init (as shipped) | ~30–50% (untrained — not usable) |
+| Target after training | this compact model typically lands **~6–8%** NME (SOTA dense models reach ~4–5% at far higher param counts) |
+
 **GPX-10 design constraints** (why this differs from the RetinaFace/PFLD reference architectures — see `COMPILER_COMPATIBILITY.md`): the checker accepts **Sequential models only**, has **no global-pooling layer** (use `AveragePooling2D` + `Flatten` instead of `GlobalAveragePooling2D`), and no merge layers (`Add`/`Concatenate`), depthwise/separable convs, or upsampling. Every block is a plain `Conv → BN → ReLU` chain, so the whole graph maps onto the supported op set.
 
 ---
