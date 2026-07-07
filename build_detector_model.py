@@ -7,9 +7,13 @@ FPN Resize + Add + depthwise conv, and a multi-head Functional graph). GPX-10
 allows only a Sequential model over a restricted op set, which rules out
 multi-scale anchor detectors — so this is a direct-regression design instead:
 
-    full image (128x128x3)  ->  Conv/BN/ReLU trunk  ->  Flatten  ->  Dense
+    full image (112x112x3)  ->  Conv/BN/ReLU trunk  ->  Flatten  ->  Dense
     ->  14 outputs: [x1, y1, x2, y2, (lx, ly) x 5]   (box + 5 landmarks, all in
         normalised [0,1] image coords)
+
+Input is 112x112 to match the rest of the pipeline's resolution. Note this is
+the DETECTOR input (the raw photo downscaled to 112x112); the aligned crop it
+ultimately produces for the landmark/recognition stage is a separate 112x112.
 
 Assumes exactly one face present (no confidence head, no NMS). The 5 landmarks
 are all the downstream similarity-transform needs; the box is a useful bonus.
@@ -32,18 +36,18 @@ def add_conv_block(model, filters, kernel_size=3, strides=1, name=None):
     model.add(layers.ReLU(name=f"{name}_relu"))
 
 
-def build_detector_model(input_shape=(128, 128, 3), num_landmarks=5):
-    # box (4) + num_landmarks * 2. ~120k params at this width.
+def build_detector_model(input_shape=(112, 112, 3), num_landmarks=5):
+    # box (4) + num_landmarks * 2. ~130k params at this width.
     out_dim = 4 + num_landmarks * 2
     model = Sequential(name="face_detector_sequential")
     model.add(layers.Input(shape=input_shape, name="image"))
 
-    add_conv_block(model, 16, strides=2, name="stem")     # 64x64
-    add_conv_block(model, 24, strides=2, name="block1")    # 32x32
+    add_conv_block(model, 16, strides=2, name="stem")     # 56x56
+    add_conv_block(model, 24, strides=2, name="block1")    # 28x28
     add_conv_block(model, 24, strides=1, name="block2")
-    add_conv_block(model, 32, strides=2, name="block3")    # 16x16
+    add_conv_block(model, 32, strides=2, name="block3")    # 14x14
     add_conv_block(model, 32, strides=1, name="block4")
-    add_conv_block(model, 48, strides=2, name="block5")    # 8x8
+    add_conv_block(model, 48, strides=2, name="block5")    # 7x7
     add_conv_block(model, 64, strides=2, name="block6")    # 4x4
 
     model.add(layers.Flatten(name="flatten"))              # 4*4*64 = 1024
@@ -56,7 +60,7 @@ def build_detector_model(input_shape=(128, 128, 3), num_landmarks=5):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="detector_model.h5")
-    ap.add_argument("--input_size", type=int, default=128)
+    ap.add_argument("--input_size", type=int, default=112)
     args = ap.parse_args()
     model = build_detector_model((args.input_size, args.input_size, 3))
     model.summary()
