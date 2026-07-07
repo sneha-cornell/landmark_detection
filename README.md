@@ -111,22 +111,24 @@ python build_landmark_model.py --out landmark_model.h5
 
 `train_landmark.py` trains the 98-point regressor on [WFLW](https://wywu.github.io/projects/LAB/WFLW.html) (PFLD-style pre-cropped 112×112 format; a ready mirror is `duongnguy/WFLW_augmented` on Hugging Face) using **Wing loss**, and reports **NME** (Normalised Mean Error, inter-ocular — the standard WFLW protocol):
 
+`train_landmark.py` applies full geometric augmentation (rotation ±25°, scale 0.85–1.20, translation ±10%, horizontal flip with an auto-derived 98-point mirror map) and a cosine-decayed LR schedule.
+
 ```bash
-python train_landmark.py --wflw_root /path/to/wflw --epochs 40 --out landmark_model.h5
+python train_landmark.py --wflw_root /path/to/wflw --epochs 80 --batch_size 128 --out landmark_model.h5
 python evaluate.py       --wflw_root /path/to/wflw --model landmark_model.h5
 ```
 
-**Measured accuracy** (74,950 train / 2,500 test images, 40 epochs, CPU):
+**Measured accuracy** (74,950 train / 2,500 test, 80 epochs, aug + cosine LR, CPU):
 
 | Metric | Value |
 |---|---|
-| NME (inter-ocular) | **21.77% mean / 16.34% median** |
-| Mean per-point error | 10.36 px (median 7.68 px) on the 112×112 crop |
-| Failure Rate @0.10 | 74.8% |
-| PCK@0.10 / @0.15 / @0.20 | 33.4% / 50.5% / 62.4% |
+| NME (inter-ocular) | **19.84%** |
+| Failure Rate @0.10 | 73.1% |
+| PCK@0.10 / @0.15 / @0.20 | 36.5% / 54.7% / 66.6% |
+| AUC@0.10 | 0.061 |
 | Mean-shape baseline (reference) | 50.1% NME |
 
-> **This is a weak baseline, not a production model.** It clearly learns (2.3× better than the mean-shape baseline) but sits well above landmark SOTA (~4% NME) and even typical compact models (~7–8%). The gap is expected: a 150k-param **direct-coordinate** regressor, trained briefly on CPU with photometric-only augmentation, on a hard dataset (WFLW is ~45% hard faces). Biggest levers to improve, in order: **geometric augmentation** (rotation/scale/translation/flip with landmark remapping), longer training with a cosine LR schedule, and heatmap-style output instead of coordinate regression (heavier, but the standard route to sub-8% NME). Note that heatmap heads use ops (e.g. transposed conv / resize) that may not be GPX-10-compatible — re-run the checker after any such change.
+> **This is a baseline, not a production model, and it has hit the capacity ceiling of the GPX-10 constraints.** Three configurations — plain, +flatten-head, and +full-augmentation+cosine — all converge to ~20% NME (19.4% / 21.8% / 19.8%), so the limiter is **model capacity**, not data or optimization. A 150k-param **direct-coordinate** regressor at 7×7 spatial resolution simply can't localise 98 points on a hard dataset (WFLW is ~45% hard faces) to landmark-SOTA levels (~4%) or even typical compact-model levels (~7–8%). The two remaining levers both trade against the GPX-10 target: **(a) relax the 200k-param cap** to widen/deepen the net, or **(b) switch to a heatmap head** (the standard route to sub-8% NME) — but heatmap upsampling uses ops (transposed conv / resize) that are **not** on the GPX-10 supported list, so it would break compatibility. Within "Sequential + supported-ops + <200k params", ~20% NME is about the achievable limit for this task.
 
 **GPX-10 design constraints** (why this differs from the RetinaFace/PFLD reference architectures — see `COMPILER_COMPATIBILITY.md`): the checker accepts **Sequential models only**, has **no global-pooling layer**, and no merge layers (`Add`/`Concatenate`), depthwise/separable convs, or upsampling. Every block is a plain `Conv → BN → ReLU` chain, so the whole graph maps onto the supported op set. The 7×7 feature map is `Flatten`ed straight into the FC head (rather than global-average-pooled to 1×1) so spatial position is preserved for landmark regression.
 

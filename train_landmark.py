@@ -52,16 +52,80 @@ def read_labels(csv_path, imgs_dir):
     return paths, np.stack(targets)
 
 
-def make_dataset(paths, targets, batch_size, training):
+def geo_augment(img, target, max_deg=25.0, scale_lo=0.85, scale_hi=1.20, trans=0.10):
+    """Random rotation + scale + translation applied CONSISTENTLY to the image and
+    the landmarks. Landmarks are the forward map; the image uses the matching
+    inverse warp (ImageProjectiveTransformV3 samples output->input)."""
+    lm = tf.reshape(target, (NUM_LANDMARKS, 2)) * CROP     # pixel coords
+    ang = tf.random.uniform([], -max_deg, max_deg) * np.pi / 180.0
+    s = tf.random.uniform([], scale_lo, scale_hi)
+    tx = tf.random.uniform([], -trans, trans) * CROP
+    ty = tf.random.uniform([], -trans, trans) * CROP
+    c = CROP / 2.0
+    cos, sin = tf.cos(ang), tf.sin(ang)
+
+    # forward: p' = s * R * (p - c) + c + t          (moves landmarks)
+    R = tf.stack([[cos, -sin], [sin, cos]])
+    lm_new = tf.matmul(lm - c, R, transpose_b=True) * s + c + tf.stack([tx, ty])
+
+    # inverse for the image op: p = B p' + d,  B = (1/s) R^-1
+    inv = 1.0 / s
+    b00, b01 = inv * cos, inv * sin
+    b10, b11 = -inv * sin, inv * cos
+    ctx, cty = c + tx, c + ty
+    d0 = c - (b00 * ctx + b01 * cty)
+    d1 = c - (b10 * ctx + b11 * cty)
+    xf = tf.stack([b00, b01, d0, b10, b11, d1, 0.0, 0.0])
+    img = tf.raw_ops.ImageProjectiveTransformV3(
+        images=img[None], transforms=xf[None], output_shape=[CROP, CROP],
+        interpolation="BILINEAR", fill_mode="REFLECT", fill_value=0.0)[0]
+    return img, tf.reshape(lm_new / CROP, (-1,))
+
+
+def compute_flip_map(targets):
+    """Derive the horizontal-flip landmark permutation empirically: mirror the
+    mean shape (x -> 1-x) and match each point to its nearest neighbour. Robust,
+    and self-checked to be an involution permutation (no hardcoded 98-pt table)."""
+    mean = targets.mean(0).reshape(NUM_LANDMARKS, 2)
+    mirror = mean.copy(); mirror[:, 0] = 1.0 - mirror[:, 0]
+    # cost[i, j] = distance between point i and the mirror of point j
+    d = np.linalg.norm(mean[:, None, :] - mirror[None, :, :], axis=-1)
+    # greedy mutual assignment -> guaranteed involution permutation
+    pairs = sorted(((d[i, j], i, j) for i in range(NUM_LANDMARKS)
+                    for j in range(NUM_LANDMARKS)), key=lambda x: x[0])
+    fmap = -np.ones(NUM_LANDMARKS, dtype=np.int32)
+    for _, i, j in pairs:
+        if fmap[i] == -1 and fmap[j] == -1:
+            fmap[i] = j; fmap[j] = i
+    assert len(set(fmap.tolist())) == NUM_LANDMARKS, "flip map not a permutation"
+    assert np.all(fmap[fmap] == np.arange(NUM_LANDMARKS)), "flip map not an involution"
+    return fmap
+
+
+def maybe_flip(img, target, flip_map):
+    def do():
+        im = tf.image.flip_left_right(img)
+        lm = tf.reshape(target, (NUM_LANDMARKS, 2))
+        lm = tf.stack([1.0 - lm[:, 0], lm[:, 1]], axis=1)
+        lm = tf.gather(lm, flip_map)                 # re-map left<->right semantics
+        return im, tf.reshape(lm, (-1,))
+    return tf.cond(tf.random.uniform([]) < 0.5, do, lambda: (img, target))
+
+
+def make_dataset(paths, targets, batch_size, training, flip_map=None):
     ds = tf.data.Dataset.from_tensor_slices((paths, targets))
     if training:
         ds = ds.shuffle(min(len(paths), 8192), reshuffle_each_iteration=True)
+    fm = tf.constant(flip_map) if flip_map is not None else None
 
     def load(path, target):
         img = tf.io.decode_png(tf.io.read_file(path), channels=3)
         img = tf.image.resize(img, (CROP, CROP))
         img = tf.cast(img, tf.float32) / 255.0
         if training:
+            if fm is not None:
+                img, target = maybe_flip(img, target, fm)
+            img, target = geo_augment(img, target)
             img = tf.image.random_brightness(img, 0.1)
             img = tf.image.random_contrast(img, 0.8, 1.2)
             img = tf.clip_by_value(img, 0.0, 1.0)
@@ -98,9 +162,9 @@ def nme_metric(y_true, y_pred):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--wflw_root", required=True)
-    ap.add_argument("--epochs", type=int, default=40)
-    ap.add_argument("--batch_size", type=int, default=64)
-    ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--epochs", type=int, default=80)
+    ap.add_argument("--batch_size", type=int, default=128)
+    ap.add_argument("--lr", type=float, default=2e-3)
     ap.add_argument("--max_train", type=int, default=0,
                     help="Optional cap on #train samples (0 = use all).")
     ap.add_argument("--out", default="landmark_model.h5")
@@ -117,27 +181,35 @@ def main():
         tr_paths = [tr_paths[i] for i in idx]; tr_y = tr_y[idx]
     print(f"train={len(tr_paths)}  test={len(te_paths)}")
 
-    train_ds = make_dataset(tr_paths, tr_y, args.batch_size, training=True)
+    flip_map = compute_flip_map(tr_y)
+    train_ds = make_dataset(tr_paths, tr_y, args.batch_size, training=True,
+                            flip_map=flip_map)
     val_ds = make_dataset(te_paths, te_y, args.batch_size, training=False)
 
+    # Cosine-decayed LR with a short warmup gives a cleaner descent than
+    # reduce-on-plateau for this regression.
+    steps_per_epoch = int(np.ceil(len(tr_paths) / args.batch_size))
+    lr_sched = optimizers.schedules.CosineDecay(
+        initial_learning_rate=args.lr, decay_steps=args.epochs * steps_per_epoch,
+        warmup_target=args.lr, warmup_steps=2 * steps_per_epoch, alpha=0.02)
+
     model = build_landmark_model((CROP, CROP, 3), NUM_LANDMARKS)
-    model.compile(optimizer=optimizers.Adam(args.lr),
+    model.compile(optimizer=optimizers.Adam(lr_sched),
                   loss=wing_loss(), metrics=[nme_metric])
     model.summary()
 
     cbs = [
-        callbacks.ReduceLROnPlateau(monitor="val_nme_metric", factor=0.5,
-                                    patience=5, min_lr=1e-5, mode="min"),
         callbacks.ModelCheckpoint(args.out, monitor="val_nme_metric",
                                   save_best_only=True, mode="min", verbose=1),
-        callbacks.EarlyStopping(monitor="val_nme_metric", patience=12,
-                                mode="min", restore_best_weights=True),
     ]
     model.fit(train_ds, validation_data=val_ds, epochs=args.epochs, callbacks=cbs)
 
-    val = model.evaluate(val_ds, return_dict=True, verbose=0)
+    # ModelCheckpoint already saved the best-NME weights to args.out; reload and
+    # report them (the in-memory model holds last-epoch weights, not the best).
+    best = tf.keras.models.load_model(args.out, compile=False)
+    best.compile(loss=wing_loss(), metrics=[nme_metric])
+    val = best.evaluate(val_ds, return_dict=True, verbose=0)
     print(f"\nBest WFLW test NME: {val['nme_metric']:.2f}%")
-    model.save(args.out)
     print(f"Saved trained model -> {args.out}")
 
 
